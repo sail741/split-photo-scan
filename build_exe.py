@@ -9,7 +9,7 @@ PyInstaller.__main__.run([
     "photo_scan_gui.py",
     "--onefile",
     "--windowed",
-    "--name", "PhotoScan",
+    "--name", "SplitPhotoScan",
     "--hidden-import", "extract_photos",
     "--add-data", "extract_photos.py:.",
 ])

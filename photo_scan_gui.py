@@ -18,7 +18,7 @@ from extract_photos import detect_photos, process_single, IMAGE_EXTENSIONS
 class PhotoScanApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Photo Scan - Extracteur de photos")
+        self.root.title("SplitPhotoScan - Extracteur de photos")
         self.root.resizable(False, False)
 
         frame = ttk.Frame(root, padding=20)

@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 extracted/
 debug_detection.jpg
+scans/
+.DS_Store
