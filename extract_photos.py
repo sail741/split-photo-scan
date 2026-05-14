@@ -147,26 +147,39 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
     max_area = total_area * 0.85
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Use adaptive threshold + Canny for robust edge detection
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Try multiple approaches and combine edges
-    # 1) Canny edge detection
+    # 1) Canny on grayscale — catches most edges
     edges_canny = cv2.Canny(blurred, 30, 100)
 
-    # 2) Adaptive threshold to catch low-contrast boundaries
+    # 2) Adaptive threshold — catches low-contrast boundaries
     thresh = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5
     )
 
-    # Combine both edge maps
-    edges = cv2.bitwise_or(edges_canny, thresh)
+    # 3) Saturation channel — photos have color, white background doesn't
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    sat_blurred = cv2.GaussianBlur(sat, (5, 5), 0)
+    _, sat_thresh = cv2.threshold(sat_blurred, 15, 255, cv2.THRESH_BINARY)
 
-    # Dilate to close gaps in edges
+    # 4) Very sensitive Canny on lightness — picks up scanner shadows
+    edges_soft = cv2.Canny(blurred, 10, 50)
+
+    # 5) Difference from background: pixels that differ from near-white
+    bg_diff = cv2.absdiff(blurred, np.full_like(blurred, 245))
+    _, bg_mask = cv2.threshold(bg_diff, 12, 255, cv2.THRESH_BINARY)
+
+    # Combine all edge maps
+    edges = cv2.bitwise_or(edges_canny, thresh)
+    edges = cv2.bitwise_or(edges, sat_thresh)
+    edges = cv2.bitwise_or(edges, edges_soft)
+    edges = cv2.bitwise_or(edges, bg_mask)
+
+    # Dilate to close gaps, then erode back
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    edges = cv2.dilate(edges, kernel, iterations=2)
-    edges = cv2.erode(edges, kernel, iterations=1)
+    edges = cv2.dilate(edges, kernel, iterations=3)
+    edges = cv2.erode(edges, kernel, iterations=2)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
