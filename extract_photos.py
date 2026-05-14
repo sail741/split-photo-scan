@@ -18,6 +18,20 @@ import cv2
 import numpy as np
 
 
+def imread_unicode(path):
+    """Read an image from a path that may contain non-ASCII characters (Windows fix)."""
+    data = np.fromfile(str(path), dtype=np.uint8)
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def imwrite_unicode(path, image, params=None):
+    """Write an image to a path that may contain non-ASCII characters (Windows fix)."""
+    ext = Path(path).suffix
+    success, buf = cv2.imencode(ext, image, params or [])
+    if success:
+        buf.tofile(str(path))
+
+
 def order_points(pts):
     """Order points as: top-left, top-right, bottom-right, bottom-left."""
     rect = np.zeros((4, 2), dtype="float32")
@@ -225,7 +239,7 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
 
     if debug:
         debug_path = "debug_detection.jpg"
-        cv2.imwrite(debug_path, debug_img)
+        imwrite_unicode(debug_path, debug_img)
         print(f"Debug image saved: {debug_path}")
 
     return photos
@@ -233,7 +247,7 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
 
 def process_single(input_path, output_dir, ext, min_area_ratio, debug):
     """Process a single scan image. Returns the number of photos extracted."""
-    image = cv2.imread(str(input_path))
+    image = imread_unicode(input_path)
     if image is None:
         print(f"  Skipping (unreadable): {input_path}", file=sys.stderr)
         return 0
@@ -256,7 +270,7 @@ def process_single(input_path, output_dir, ext, min_area_ratio, debug):
             params = [cv2.IMWRITE_JPEG_QUALITY, 95]
         elif ext == "png":
             params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
-        cv2.imwrite(str(out_path), photo, params)
+        imwrite_unicode(out_path, photo, params)
         ph, pw = photo.shape[:2]
         print(f"  Saved: {out_path} ({pw}x{ph})")
 
