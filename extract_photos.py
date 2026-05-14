@@ -145,18 +145,21 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
     min_area = total_area * min_area_ratio
     max_area = total_area * 0.85
 
+    # Downscale for detection (work at ~1800px max dimension)
+    max_detect = 1800
+    detect_scale = 1.0
+    if max(h, w) > max_detect:
+        detect_scale = max_detect / max(h, w)
+    dh, dw = int(h * detect_scale), int(w * detect_scale)
+    small = cv2.resize(image, (dw, dh), interpolation=cv2.INTER_AREA)
+
     # Add a white border so photos touching edges are fully enclosed
-    border = 20
-    bordered = cv2.copyMakeBorder(image, border, border, border, border,
+    border = 10
+    bordered = cv2.copyMakeBorder(small, border, border, border, border,
                                   cv2.BORDER_CONSTANT, value=(255, 255, 255))
 
     gray = cv2.cvtColor(bordered, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Scale morphological operations to image size
-    scale = max(h, w) / 3500  # reference size
-    def ksz(base):
-        return max(3, int(base * scale)) | 1  # ensure odd
 
     # Detect white background
     _, bg_mask = cv2.threshold(blurred, 220, 255, cv2.THRESH_BINARY)
@@ -169,65 +172,29 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
     # Foreground = not white OR has color
     fg_mask = cv2.bitwise_or(cv2.bitwise_not(bg_mask), sat_mask)
 
-    # Close small noise gaps within photos, but keep inter-photo gaps open
-    k_close = ksz(5)
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close, k_close))
+    # Close small noise gaps within photos
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
 
-    # Reinforce white separator lines between photos:
-    # Project brightness horizontally and vertically to find white channels
-    bh, bw = bordered.shape[:2]
+    # Reinforce white separator lines between photos
     row_brightness = blurred.mean(axis=1)
     col_brightness = blurred.mean(axis=0)
     bright_threshold = 200
-    # Erase rows/cols that are mostly white (= gaps between photos)
-    for y in range(bh):
-        if row_brightness[y] > bright_threshold:
-            fg_mask[y, :] = 0
-    for x in range(bw):
-        if col_brightness[x] > bright_threshold:
-            fg_mask[:, x] = 0
+    fg_mask[row_brightness > bright_threshold, :] = 0
+    fg_mask[:, col_brightness > bright_threshold] = 0
 
-    # Re-close to fill any small breaks caused by the line erasure
-    k_close2 = ksz(5)
-    kernel_close2 = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close2, k_close2))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close2, iterations=2)
+    # Re-close to fill small breaks caused by line erasure
+    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
 
-    # Erode to further separate photos
-    k_sep = ksz(5)
-    kernel_sep = cv2.getStructuringElement(cv2.MORPH_RECT, (k_sep, k_sep))
-    seeds = cv2.erode(fg_mask, kernel_sep, iterations=4)
+    # Erode to separate photos, then dilate back
+    kernel_sep = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    fg_mask = cv2.erode(fg_mask, kernel_sep, iterations=3)
+    fg_mask = cv2.dilate(fg_mask, kernel_sep, iterations=3)
 
-    # Find seed contours (one per photo)
-    seed_contours, _ = cv2.findContours(seeds, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # For each seed, find its full extent in the original foreground mask
-    # by flood-filling from the seed region
-    bh, bw = fg_mask.shape
-    contours = []
-    used = np.zeros_like(fg_mask)
-    for sc in seed_contours:
-        # Create a mask for this seed
-        seed_mask = np.zeros_like(fg_mask)
-        cv2.drawContours(seed_mask, [sc], 0, 255, -1)
-        # Grow the seed to fill the connected foreground region
-        combined = cv2.bitwise_and(fg_mask, cv2.bitwise_not(used))
-        # Dilate seed iteratively until it stops growing within fg_mask
-        prev = seed_mask
-        k_grow = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        for _ in range(200):
-            grown = cv2.dilate(prev, k_grow, iterations=1)
-            grown = cv2.bitwise_and(grown, combined)
-            if np.array_equal(grown, prev):
-                break
-            prev = grown
-        if cv2.countNonZero(prev) > 0:
-            region_contours, _ = cv2.findContours(prev, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if region_contours:
-                contours.append(max(region_contours, key=cv2.contourArea))
-                used = cv2.bitwise_or(used, prev)
-
-    # Offset contours back to remove the border we added
+    # Scale contours back to original image coordinates
+    contours = [((c - border) / detect_scale).astype(np.int32) for c in contours]
     contours = [c - border for c in contours]
 
     photos = []
