@@ -70,58 +70,98 @@ def four_point_transform(image, pts):
 
 def autocrop_to_content(image):
     """
-    Crop to the actual photo content by detecting strong edges near each border.
-    Scans inward from each side to find the first row/column with a significant
-    gradient transition (= the real photo boundary).
+    Two-pass autocrop:
+    1) Contour-based: removes white triangles in corners from rotation
+    2) Gradient-based: fine-tunes each edge to the actual photo boundary
     """
+    h, w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Compute gradient magnitude (Sobel)
+    # --- Pass 1: contour-based crop (handles corners and margins) ---
+    _, white_mask = cv2.threshold(blurred, 210, 255, cv2.THRESH_BINARY)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    _, sat_mask = cv2.threshold(sat, 15, 255, cv2.THRESH_BINARY)
+    content = cv2.bitwise_or(cv2.bitwise_not(white_mask), sat_mask)
+    # Light close to fill noise but not extend into margins
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    content = cv2.morphologyEx(content, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # Erode to pull boundary inward past interpolated edge pixels
+    content = cv2.erode(content, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(content, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        x, y, cw, ch = cv2.boundingRect(largest)
+        if cw >= w * 0.5 and ch >= h * 0.5:
+            image = image[y:y+ch, x:x+cw]
+
+    # --- Pass 1b: trim rows/columns that are mostly white ---
+    h, w = image.shape[:2]
+    gray2 = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    white_ratio = 0.5  # if >50% of a row/col is white, trim it
+    top, bottom, left, right = 0, h, 0, w
+    max_trim = int(min(h, w) * 0.08)
+    for i in range(max_trim):
+        if np.mean(gray2[top, left:right] > 220) > white_ratio:
+            top += 1
+        else:
+            break
+    for i in range(max_trim):
+        if np.mean(gray2[bottom - 1, left:right] > 220) > white_ratio:
+            bottom -= 1
+        else:
+            break
+    for i in range(max_trim):
+        if np.mean(gray2[top:bottom, left] > 220) > white_ratio:
+            left += 1
+        else:
+            break
+    for i in range(max_trim):
+        if np.mean(gray2[top:bottom, right - 1] > 220) > white_ratio:
+            right -= 1
+        else:
+            break
+    if (right - left) >= w * 0.5 and (bottom - top) >= h * 0.5:
+        image = image[top:bottom, left:right]
+
+# --- Pass 2: gradient-based edge refinement ---
+    h, w = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
     gradient = np.sqrt(grad_x ** 2 + grad_y ** 2)
 
-    # Only search within the first/last 15% of each dimension
     search_h = max(int(h * 0.15), 10)
     search_w = max(int(w * 0.15), 10)
-
-    # Threshold: a row/column is "content" if its mean gradient is above this
-    # Use a fraction of the image's overall mean gradient
     global_mean = gradient.mean()
     edge_threshold = global_mean * 0.5
 
-    # Find the peak gradient row/col near each edge, then crop just past it
-
-    # Scan from top: find the row with the strongest gradient, crop past it
     top = 0
     row_means = gradient[:search_h, :].mean(axis=1)
     peak = int(np.argmax(row_means))
     if row_means[peak] > edge_threshold:
         top = peak + 2
 
-    # Scan from bottom
     bottom = h
     row_means = gradient[h - search_h:, :].mean(axis=1)
     peak = int(np.argmax(row_means[::-1]))
     if row_means[search_h - 1 - peak] > edge_threshold:
         bottom = h - peak - 2
 
-    # Scan from left
     left = 0
     col_means = gradient[:, :search_w].mean(axis=0)
     peak = int(np.argmax(col_means))
     if col_means[peak] > edge_threshold:
         left = peak + 2
 
-    # Scan from right
     right = w
     col_means = gradient[:, w - search_w:].mean(axis=0)
     peak = int(np.argmax(col_means[::-1]))
     if col_means[search_w - 1 - peak] > edge_threshold:
         right = w - peak - 2
 
-    # Sanity check: cropped region must be at least 50% of original
     if (right - left) < w * 0.5 or (bottom - top) < h * 0.5:
         return image
 
@@ -172,30 +212,55 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
     # Foreground = not white OR has color
     fg_mask = cv2.bitwise_or(cv2.bitwise_not(bg_mask), sat_mask)
 
-    # Close small noise gaps within photos
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+    # Minimal close: fill pixel-level noise only, preserve inter-photo gaps
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
 
-    # Reinforce white separator lines between photos
-    row_brightness = blurred.mean(axis=1)
-    col_brightness = blurred.mean(axis=0)
-    bright_threshold = 200
-    fg_mask[row_brightness > bright_threshold, :] = 0
-    fg_mask[:, col_brightness > bright_threshold] = 0
-
-    # Re-close to fill small breaks caused by line erasure
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
-
-    # Erode to separate photos, then dilate back
+    # Erode to widen gaps and separate close photos, then dilate back
     kernel_sep = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    fg_mask = cv2.erode(fg_mask, kernel_sep, iterations=3)
-    fg_mask = cv2.dilate(fg_mask, kernel_sep, iterations=3)
+    fg_mask = cv2.erode(fg_mask, kernel_sep, iterations=4)
+    fg_mask = cv2.dilate(fg_mask, kernel_sep, iterations=4)
 
     contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    # Try to split oversized contours using separator line detection
+    # (for photos touching each other with almost no gap)
+    split_contours = []
+    oversized_threshold = 0.4  # contours covering >40% of image are suspicious
+    for c in contours:
+        c_area = cv2.contourArea(c)
+        bh_d, bw_d = fg_mask.shape
+        if c_area > bh_d * bw_d * oversized_threshold:
+            # Create mask for just this contour region
+            c_mask = np.zeros_like(fg_mask)
+            cv2.drawContours(c_mask, [c], 0, 255, -1)
+            region = cv2.bitwise_and(c_mask, cv2.bitwise_not(fg_mask))
+            # Find white channels inside this region using line detection
+            line_len = max(dh, dw) // 12
+            h_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (1, line_len))
+            v_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (line_len, 1))
+            # Use a lower threshold for oversized regions (catch shadowed gaps)
+            _, inner_bg = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
+            inner_bg = cv2.bitwise_and(inner_bg, c_mask)
+            h_lines = cv2.morphologyEx(inner_bg, cv2.MORPH_OPEN, h_kern)
+            v_lines = cv2.morphologyEx(inner_bg, cv2.MORPH_OPEN, v_kern)
+            seps = cv2.bitwise_or(h_lines, v_lines)
+            widen_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            seps = cv2.dilate(seps, widen_k, iterations=2)
+            # Cut the contour with separators and find sub-contours
+            split_mask = cv2.bitwise_and(fg_mask, cv2.bitwise_not(seps))
+            split_mask = cv2.bitwise_and(split_mask, c_mask)
+            sub_contours, _ = cv2.findContours(split_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(sub_contours) > 1:
+                split_contours.extend(sub_contours)
+            else:
+                split_contours.append(c)
+        else:
+            split_contours.append(c)
+    contours = split_contours
+
     # Scale contours back to original image coordinates
     contours = [((c - border) / detect_scale).astype(np.int32) for c in contours]
-    contours = [c - border for c in contours]
 
     photos = []
     boxes_used = []
@@ -219,7 +284,12 @@ def detect_photos(image, min_area_ratio=0.01, debug=False):
 
         # Filter by aspect ratio — photos are roughly rectangular, not thin strips
         aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
-        if aspect > 5:
+        if aspect > 4:
+            continue
+
+        # Filter out fragments: smallest side must be >= 15% of scan's smaller dim
+        min_dim = min(rect_w, rect_h)
+        if min_dim < min(h, w) * 0.15:
             continue
 
         # Check that the contour fills a reasonable portion of its bounding rect
